@@ -57,7 +57,7 @@ A rep is a **no rep** if it scores below 70, never reaches depth, leans past 60Â
 Python 3.9 to 3.12.
 
 ```bash
-git clone https://github.com/<your-username>/ai-squat-coach.git
+git clone https://github.com/nimrafaryal/ai-squat-coach.git
 cd ai-squat-coach
 pip install -r requirements.txt
 python run_coach.py path/to/squat.mp4
