@@ -1,0 +1,6 @@
+mediapipe>=0.10.20
+opencv-python
+numpy
+edge-tts
+imageio-ffmpeg
+pillow

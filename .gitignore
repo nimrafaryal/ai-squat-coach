@@ -1,0 +1,23 @@
+# Your videos and generated results (keep personal footage off GitHub)
+videos/
+output/
+*.mp4
+*.mov
+*.m4a
+*.mp3
+
+# Downloaded at first run
+models/
+fonts/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
