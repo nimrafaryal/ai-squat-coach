@@ -13,10 +13,15 @@ Writes:
     output/<name>_voice.m4a    the coach's voice track (Step 5 uses it)
     output/<name>_coached.mp4  the annotated video with the voice (H.264 + AAC)
 
+Timing: every clip is trimmed of its built-in silence, counts start as the
+arms/legs lock out, and nothing is ever queued late: when reps come fast the
+coach just says the number, and a line that would land late is dropped.
+
 Usage:
     python step4_voice_coach.py videos/squat.mp4
-    python step4_voice_coach.py videos/squat.mp4 --voice en-GB-RyanNeural
+    python step4_voice_coach.py videos/squat.mp4 --voice en-US-BrianNeural
     python step4_voice_coach.py videos/squat.mp4 --no-music
+    python step4_voice_coach.py --sample        (hear 6 voices, then pick one)
 
 Needs internet for the voice (Microsoft's free neural voices via edge-tts).
 """
@@ -37,9 +42,20 @@ DEFAULT_VOICE = "en-US-AndrewNeural"   # warm, energetic male coach
 # Others: en-US-AriaNeural (female), en-GB-RyanNeural (British), en-US-GuyNeural,
 #         en-AU-WilliamNeural. See all with: edge-tts --list-voices
 
-GAP_S = 0.2           # silence kept between two spoken lines
-MAX_DELAY_S = 1.2     # a line pushed later than this is dropped (the moment passed)
-MUSIC_VOLUME = 0.2    # the original clip's sound, kept quietly under the voice
+GAP_S = 0.12          # silence kept between two spoken lines
+COUNT_LEAD_S = 0.10   # counts start this much before the rep finishes, so they land on it
+# How late (seconds) a line may start before it's dropped instead: by priority
+LATE_OK = {1: 0.25, 2: 0.35, 3: 0.70, 4: 99.0}
+MUSIC_VOLUME = 0.35   # the clip's own sound; it is also ducked whenever the coach talks
+
+# How each kind of line is spoken: shouts fast and bright, counts crisp, summary calm
+STYLES = {
+    "shout": {"rate": "+14%", "pitch": "+6Hz", "volume": "+10%"},
+    "count": {"rate": "+6%", "pitch": "+3Hz", "volume": "+5%"},
+    "say":   {"rate": "+0%", "pitch": "+0Hz", "volume": "+0%"},
+}
+SAMPLE_VOICES = ["en-US-AndrewNeural", "en-US-BrianNeural", "en-US-GuyNeural",
+                 "en-US-ChristopherNeural", "en-GB-RyanNeural", "en-US-AriaNeural"]
 
 NUMBERS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
            "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
@@ -49,14 +65,14 @@ NUMBERS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight
 SHOUT = {      # said mid-rep, the moment the fault appears
     "lean": ["Chest up!", "Chest up, chest up!", "Stay tall!"],
     "heels": ["Heels down!", "Stay on your heels!", "Heels planted!"],
-    "knees": ["Knees out!", "Push those knees out!", "Knees out, knees out!"],
+    "knees": ["Knees out!", "Push the knees out!", "Knees out, knees out!"],
 }
 FIX = {        # the reason, when it wasn't already shouted
-    "depth": ["You need to go lower.", "Hips below your knees.", "Sit deeper next time."],
-    "lean": ["Keep your chest up.", "Don't fold forward."],
-    "heels": ["Keep your heels down.", "Weight back in your heels."],
-    "knees": ["Push your knees out.", "Knees over your toes."],
-    "tempo": ["Too rushed, slow it down.", "Control it on the way down."],
+    "depth": ["Go lower.", "Hips below knees.", "Sit deeper."],
+    "lean": ["Chest up.", "Don't fold forward."],
+    "heels": ["Heels down.", "Stay on your heels."],
+    "knees": ["Knees out.", "Knees over toes."],
+    "tempo": ["Too rushed.", "Slow it down."],
     None: ["Not quite there."],
 }
 NO_REP = ["That one doesn't count.", "No rep.", "Not that one."]
@@ -75,6 +91,43 @@ FOCUS = {
     "tempo": "slowing down on the way down",
 }
 
+# ---- push-ups: same structure, different words
+PUSHUP_SHOUT = {
+    "sag": ["Hips up!", "Squeeze your glutes!", "Hips up, hips up!"],
+    "pike": ["Hips down!", "Straight line!", "Flatten out!"],
+    "head": ["Head up!", "Chest first!", "Head in line!"],
+}
+PUSHUP_FIX = {
+    "depth": ["Chest lower.", "All the way down.", "Go lower."],
+    "sag": ["Hips up.", "Squeeze your glutes."],
+    "pike": ["Hips down.", "Straight line."],
+    "head": ["Chest first, not your head."],
+    "tempo": ["Too rushed.", "Slow it down."],
+    "lockout": ["Lock out at the top."],
+    None: ["Not quite there."],
+}
+PUSHUP_TIP = {
+    "depth": ["a little lower next one.", "get that chest closer to the floor."],
+    "sag": ["keep those hips up.", "squeeze your glutes."],
+    "pike": ["hips down a touch.", "keep a straight line."],
+    "head": ["keep your head in line.", "lead with the chest."],
+    "tempo": ["slow it down on the way down.", "control the descent."],
+    "lockout": ["finish with straight arms.", "lock out at the top."],
+}
+PUSHUP_FOCUS = {
+    "depth": "getting your chest lower", "sag": "keeping your hips up",
+    "pike": "keeping a straight body line", "head": "keeping your head in line",
+    "tempo": "slowing down on the way down", "lockout": "locking out at the top",
+}
+
+
+def phrases(report):
+    """The words the coach uses, for the exercise in the report."""
+    if report.get("exercise") == "pushup":
+        return {"shout": PUSHUP_SHOUT, "fix": PUSHUP_FIX, "tip": PUSHUP_TIP,
+                "focus": PUSHUP_FOCUS, "unit": "push-ups"}
+    return {"shout": SHOUT, "fix": FIX, "tip": TIP, "focus": FOCUS, "unit": "reps"}
+
 
 def pick(options, n):
     """Rotate through phrasings so the coach never repeats itself back to back."""
@@ -86,8 +139,26 @@ def say_number(n):
 
 
 # ---------------------------------------------------------------- the script
-def lines_for_person(person, many, counter):
-    """What the coach says to one person, and when."""
+# Which scoring rule each named fault belongs to (push-up sag/pike are both "body")
+RULE_OF = {"sag": "body", "pike": "body"}
+
+
+def shout_for(rep, ph):
+    """The one mid-rep shout worth making, or None. Only the fault that actually
+    decided the rep is shouted, so the coach never says "Flatten out!" about a
+    rep it then calls clean, or shouts one fault and fails the rep for another."""
+    fault = rep["main_fault"]
+    if fault not in ph["shout"]:
+        return None
+    lost = rep["points_lost"].get(RULE_OF.get(fault, fault), 0)
+    if rep["valid"] and lost < 5:
+        return None
+    return next((lf for lf in rep.get("live_faults", []) if lf["fault"] == fault), None)
+
+
+def lines_for_person(person, many, counter, ph):
+    """What the coach says to one person, and when. Every line has a target
+    time; count lines also have a short version used when reps come fast."""
     who = f"Person {person['person']}, " if many else ""
     lines, good, streak, deepest = [], 0, 0, None
     first_descent = None
@@ -97,65 +168,62 @@ def lines_for_person(person, many, counter):
         m = rep["measured"]
         if first_descent is None:
             first_descent = m["tempo"]
-
-        # 1) Mid-rep shout, at the moment the first fault appeared
-        shouted = None
-        for lf in rep.get("live_faults", []):
-            if lf["fault"] in SHOUT:
-                shouted = lf["fault"]
-                lines.append({"time_s": lf["time_s"], "priority": 3,
-                              "text": who + pick(SHOUT[shouted], counter["shout"])})
-                counter["shout"] += 1
-                break
-
-        # 2) End of rep
         fault = rep["main_fault"]
+
+        # 1) Mid-rep shout, the moment the deciding fault appears
+        lf = shout_for(rep, ph)
+        if lf:
+            lines.append({"time_s": lf["time_s"], "priority": 3, "style": "shout",
+                          "text": who + pick(ph["shout"][fault], counter["shout"])})
+            counter["shout"] += 1
+
+        # 2) No rep: short if the reason was already shouted
         if not rep["valid"]:
             streak = 0
-            if shouted and shouted == fault:
-                text = pick(NO_REP, counter["norep"])          # reason already given
+            if lf:
+                text = "No rep."
             else:
-                text = f"{pick(NO_REP, counter['norep'])} {pick(FIX[fault], counter['fix'])}"
+                text = f"No rep. {pick(ph['fix'][fault], counter['fix'])}"
                 counter["fix"] += 1
-            counter["norep"] += 1
-            lines.append({"time_s": rep["time_s"], "priority": 3, "text": who + text})
+            lines.append({"time_s": rep["time_s"], "priority": 3, "style": "say",
+                          "text": who + text, "short": who + "No rep."})
             continue
 
+        # 3) Good rep: the count, plus a comment only if there's time for it
         good += 1
         streak = streak + 1 if rep["score"] >= 85 else 0
         count = say_number(good)
         count = count if who else count.capitalize()
         depth = m["depth"]
+        short = f"{who}{count}."
 
-        if fault == "tempo" and good > 2 and m["tempo"] < first_descent * 0.7:
-            text = f"{count}. You're speeding up, control it."
-            priority = 3
-        elif fault and fault != shouted and good - last_tip.get(fault, -9) >= 3:
+        if lf:                                    # just shouted at: count, no praise
+            text, priority = short, 2
+        elif fault == "tempo" and good > 2 and m["tempo"] < first_descent * 0.7:
+            text, priority = f"{who}{count}. Slow it down.", 3
+        elif fault in ph["tip"] and good - last_tip.get(fault, -9) >= 3:
             last_tip[fault] = good                # don't nag: once every 3 reps at most
-            text = f"{count}, {pick(TIP[fault], counter['tip'])}"
+            text, priority = f"{who}{count}, {pick(ph['tip'][fault], counter['tip'])}", 2
             counter["tip"] += 1
-            priority = 2
         elif deepest is not None and depth < deepest - 5:
-            text = f"{count}. Deepest one yet!"
-            priority = 2
+            text, priority = f"{who}{count}. Deepest one yet!", 2
         elif streak == 3:
-            text = f"{count}. Three clean in a row!"
-            priority = 2
-        elif good % 2 == 0:                       # every other rep: just the count
-            text = f"{count}."
-            priority = 2
+            text, priority = f"{who}{count}. Three clean in a row!", 2
+        elif good % 2 == 0:
+            text, priority = short, 2
         else:
-            text = f"{count}. {pick(PRAISE, counter['praise'])}"
+            text, priority = f"{who}{count}. {pick(PRAISE, counter['praise'])}", 2
             counter["praise"] += 1
-            priority = 2
         if many and priority == 2:
             priority = 1                          # two people: corrections matter more
         deepest = depth if deepest is None else min(deepest, depth)
-        lines.append({"time_s": rep["time_s"], "priority": priority, "text": who + text})
+        lines.append({"time_s": max(0.0, rep["time_s"] - COUNT_LEAD_S), "priority": priority,
+                      "style": "count", "text": text, "short": short})
     return lines
 
 
 def summary_line(report):
+    ph = phrases(report)
     people = report["people"]
     faults = Counter(r["main_fault"] for p in people for r in p["reps"] if r["main_fault"])
     if len(people) == 1:
@@ -168,7 +236,7 @@ def summary_line(report):
         text = "Set done. " + " ".join(parts)
     avg = [p["average_score"] for p in people if p["average_score"] is not None]
     if faults:
-        text += f" Next set, focus on {FOCUS[faults.most_common(1)[0][0]]}."
+        text += f" Next set, focus on {ph['focus'][faults.most_common(1)[0][0]]}."
     elif avg and min(avg) >= 90:
         text += " That was a great set."
     return text
@@ -180,27 +248,49 @@ def write_lines(report):
         return []
     many = len(people) > 1
     counter = Counter()
+    ph = phrases(report)
     lines = []
     for p in people:
-        lines += lines_for_person(p, many, counter)
+        lines += lines_for_person(p, many, counter, ph)
 
     first = min(r["start_s"] for p in people for r in p["reps"])
     if first >= 1.2:
-        lines.append({"time_s": max(0.0, first - 1.2), "priority": 1,
-                      "text": "Alright, let's go."})
+        lines.append({"time_s": max(0.0, first - 1.2), "priority": 1, "style": "shout",
+                      "text": "Let's go!"})
     last = max(r["time_s"] for p in people for r in p["reps"])
-    lines.append({"time_s": last + 0.5, "priority": 4, "text": summary_line(report)})
+    lines.append({"time_s": last + 0.6, "priority": 4, "style": "say",
+                  "text": summary_line(report)})
     return sorted(lines, key=lambda l: l["time_s"])
 
 
 # ---------------------------------------------------------------- speech
+async def tts_clip(text, voice, style, folder, cache):
+    """Speak one line, trim the silence edge-tts leaves around it, and return
+    (wav path, duration). Identical lines are only generated once."""
+    key = (text, style)
+    if key in cache:
+        return cache[key]
+    i = len(cache)
+    mp3, wav = os.path.join(folder, f"raw_{i:03d}.mp3"), os.path.join(folder, f"line_{i:03d}.wav")
+    await edge_tts.Communicate(text, voice, **STYLES[style]).save(mp3)
+    trim = ("silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.02,"
+            "areverse,silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.06,"
+            "areverse")
+    subprocess.run([FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", mp3,
+                    "-af", trim, "-ar", "48000", "-ac", "1", wav], check=True)
+    cache[key] = (wav, media_info(wav)["duration"])
+    return cache[key]
+
+
 async def synthesise(lines, voice, folder):
     os.makedirs(folder, exist_ok=True)
-    for i, line in enumerate(lines):
-        path = os.path.join(folder, f"line_{i:03d}.mp3")
-        await edge_tts.Communicate(line["text"], voice, rate="+8%").save(path)
-        line["audio"] = path
-        line["duration_s"] = media_info(path)["duration"]
+    cache = {}
+    for line in lines:
+        line["audio"], line["duration_s"] = await tts_clip(
+            line["text"], voice, line["style"], folder, cache)
+        if line.get("short") and line["short"] != line["text"]:
+            line["short_audio"], line["short_duration_s"] = await tts_clip(
+                line["short"], voice, line["style"], folder, cache)
         print(f"  [{line['time_s']:6.2f}s] {line['text']}")
 
 
@@ -213,29 +303,43 @@ def media_info(path):
     return {"duration": duration, "has_audio": "Audio:" in out}
 
 
+def use_short(line):
+    line["text"], line["audio"], line["duration_s"] = (
+        line["short"], line["short_audio"], line["short_duration_s"])
+
+
 def schedule(lines, video_duration):
-    """Lines never talk over each other. Low-priority lines give way to a
-    correction; a line that would come too late is dropped, except
-    corrections and the summary."""
+    """Place every line on the timeline without overlaps and without drift.
+    - A long line is swapped for its short version if it would run into the
+      next line's moment.
+    - A count or comment that would run into a correction is dropped.
+    - A line that would start late is dropped rather than queued (corrections
+      may be a bit later; the summary always plays)."""
     lines = sorted(lines, key=lambda l: l["time_s"])
-
-    def blocks_more_important(l):
-        # only a correction (priority 3) cancels a line; the summary can just wait
-        return any(o is not l and o["priority"] == 3 > l["priority"]
-                   and l["time_s"] <= o["time_s"] <= l["time_s"] + l["duration_s"] + GAP_S
-                   for o in lines)
-    for l in [l for l in lines if l["priority"] < 3 and blocks_more_important(l)]:
-        print(f"  skipped (something more important is due): {l['text']}")
-    lines = [l for l in lines if not (l["priority"] < 3 and blocks_more_important(l))]
-
     kept, free_at = [], 0.0
-    for line in lines:
+    for i, line in enumerate(lines):
         start = max(line["time_s"], free_at)
-        if start - line["time_s"] > MAX_DELAY_S and line["priority"] < 3:
-            print(f"  skipped (too late): {line['text']}")
+        if start - line["time_s"] > LATE_OK[line["priority"]]:
+            print(f"  dropped (would be {start - line['time_s']:.1f}s late): {line['text']}")
             continue
         if start >= video_duration and line["priority"] < 4:
             continue
+        later = [o for o in lines[i + 1:] if o["priority"] >= 2]
+        nxt = later[0] if later else None
+        if "short_audio" in line and nxt:
+            # corrections, and anything just before the summary, may push the next
+            # line back a little rather than lose their words
+            room = 0.5 if nxt["priority"] == 4 else 0.25 if line["priority"] >= 3 else 0.0
+            if start + line["duration_s"] + GAP_S > nxt["time_s"] + room:
+                use_short(line)
+        fixes = [o for o in lines[i + 1:] if o["priority"] == 3]   # summary can wait; fixes can't
+        if line["priority"] < 3 and fixes:
+            clash = lambda: start + line["duration_s"] + GAP_S > fixes[0]["time_s"] + 0.1
+            if clash() and "short_audio" in line:
+                use_short(line)
+            if clash():
+                print(f"  dropped (a correction is due): {line['text']}")
+                continue
         line["start_s"] = start
         free_at = start + line["duration_s"] + GAP_S
         kept.append(line)
@@ -244,25 +348,37 @@ def schedule(lines, video_duration):
 
 # ---------------------------------------------------------------- mixing
 def mix_voice_track(lines, source_video, out_path, keep_music):
-    """All voice lines at their moments, plus the clip's own sound, quietly."""
+    """Voice lines at their moments, cleaned up (low-cut, gentle compression),
+    the clip's own sound ducked under the voice, and the whole thing levelled
+    to a standard loudness. 48 kHz stereo AAC."""
     cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error"]
     for line in lines:
         cmd += ["-i", line["audio"]]
     music = keep_music and media_info(source_video)["has_audio"]
     if music:
         cmd += ["-i", source_video]
-    parts, labels = [], []
+    parts = []
     for i, line in enumerate(lines):
-        ms = int(line["start_s"] * 1000)
-        parts.append(f"[{i}:a]adelay={ms}|{ms},volume=1.6[v{i}]")
-        labels.append(f"[v{i}]")
+        ms = int(round(line["start_s"] * 1000))
+        parts.append(f"[{i}:a]adelay={ms}:all=1[v{i}]")
+    voices = "".join(f"[v{i}]" for i in range(len(lines)))
+    parts.append(f"{voices}amix=inputs={len(lines)}:normalize=0:duration=longest,"
+                 "highpass=f=80,acompressor=threshold=-18dB:ratio=3:attack=5:release=150:makeup=2"
+                 "[vox]")
     if music:
-        parts.append(f"[{len(lines)}:a]volume={MUSIC_VOLUME}[m]")
-        labels.append("[m]")
-    parts.append(f"{''.join(labels)}amix=inputs={len(labels)}:normalize=0:"
-                 f"duration=longest[aout]")
+        parts.append("[vox]asplit=2[voxa][voxsc]")
+        parts.append(f"[{len(lines)}:a]aresample=48000,aformat=channel_layouts=mono,"
+                     f"volume={MUSIC_VOLUME}[mus]")
+        parts.append("[mus][voxsc]sidechaincompress=threshold=0.02:ratio=10:attack=10:"
+                     "release=400[duck]")
+        parts.append("[voxa][duck]amix=inputs=2:normalize=0:duration=longest[mix]")
+        last = "[mix]"
+    else:
+        last = "[vox]"
+    parts.append(f"{last}loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,"
+                 "aformat=channel_layouts=stereo[aout]")
     cmd += ["-filter_complex", ";".join(parts), "-map", "[aout]",
-            "-c:a", "aac", "-b:a", "160k", out_path]
+            "-c:a", "aac", "-b:a", "192k", out_path]
     subprocess.run(cmd, check=True)
 
 
@@ -278,13 +394,49 @@ def mux(video, audio, out_path):
     subprocess.run(cmd, check=True)
 
 
+# ---------------------------------------------------------------- voice samples
+SAMPLE_SCRIPT = [("Let's go!", "shout"), ("One. Nice.", "count"), ("Two.", "count"),
+                 ("Hips down!", "shout"), ("No rep.", "say"), ("Three. Strong.", "count"),
+                 ("Set done. Seven clean out of nine. Next set, focus on keeping a "
+                  "straight body line.", "say")]
+
+
+async def make_samples(folder="output/voice_samples"):
+    """The same short coaching script in several voices, to choose from."""
+    os.makedirs(folder, exist_ok=True)
+    for voice in SAMPLE_VOICES:
+        cache, clips = {}, []
+        for text, style in SAMPLE_SCRIPT:
+            clips.append((await tts_clip(text, voice, style, os.path.join(folder, voice),
+                                         cache))[0])
+        out = os.path.join(folder, f"{voice}.m4a")
+        inputs = sum((["-i", c] for c in clips), [])
+        gaps = "".join(f"[{i}:a]apad=pad_dur=0.45[a{i}];" for i in range(len(clips)))
+        cat = "".join(f"[a{i}]" for i in range(len(clips)))
+        subprocess.run([FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *inputs,
+                        "-filter_complex", f"{gaps}{cat}concat=n={len(clips)}:v=0:a=1,"
+                        "loudnorm=I=-16:TP=-1.5[o]", "-map", "[o]", "-c:a", "aac",
+                        "-b:a", "192k", out], check=True)
+        print(f"  {out}")
+
+
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description="Add the voice coach to a Step 3 video.")
-    ap.add_argument("video", help="the ORIGINAL video you gave Step 3, e.g. videos/squat.mp4")
+    ap.add_argument("video", nargs="?", help="the ORIGINAL video you gave Step 3")
     ap.add_argument("--voice", default=DEFAULT_VOICE)
     ap.add_argument("--no-music", action="store_true", help="drop the clip's own sound")
+    ap.add_argument("--sample", action="store_true",
+                    help="save a short sample in several voices to output/voice_samples")
     args = ap.parse_args()
+
+    if args.sample:
+        print("Making voice samples...")
+        asyncio.run(make_samples())
+        print("Listen, then use your favourite with --voice <name>.")
+        return
+    if not args.video:
+        ap.error("give a video, or use --sample")
 
     name = os.path.splitext(os.path.basename(args.video))[0]
     form_video, report_path = f"output/{name}_form.mp4", f"output/{name}_reps.json"
@@ -293,8 +445,6 @@ def main():
             sys.exit(f"Missing {p}. Run Step 3 first: python step3_form_score.py {args.video}")
     with open(report_path) as f:
         report = json.load(f)
-    if "live_faults" not in str(report):
-        print("Note: this report is from an older Step 3. Re-run Step 3 for mid-rep cues.")
 
     lines = write_lines(report)
     if not lines:
@@ -307,6 +457,9 @@ def main():
         sys.exit(f"Voice generation failed ({e}). Check your internet connection.")
 
     lines = schedule(lines, media_info(form_video)["duration"])
+    print("\nFinal timing:")
+    for l in lines:
+        print(f"  {l['start_s']:6.2f}s  {l['text']}")
     voice_path, out_path = f"output/{name}_voice.m4a", f"output/{name}_coached.mp4"
     print("Mixing...")
     mix_voice_track(lines, args.video, voice_path, keep_music=not args.no_music)

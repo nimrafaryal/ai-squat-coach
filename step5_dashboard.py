@@ -32,7 +32,9 @@ SS = 2                                   # draw at 2x, then shrink = smooth edge
 # ---------------------------------------------------------------- layout (1x pixels)
 H = 1080
 MARGIN, GAP = 36, 28
-PANEL_W = 820
+PANEL_W = 820                 # right panel, portrait videos
+WIDE_VIDEO_W = 1100           # video width for landscape videos
+WIDE_PANEL_W = 720            # right panel, landscape videos
 VIDEO_MAX_W = 900
 RADIUS = 26
 
@@ -56,6 +58,22 @@ FAULT_TAG = {"depth": "DEPTH", "lean": "CHEST", "heels": "HEELS", "knees": "KNEE
 FOCUS = {"depth": "Go a little deeper", "lean": "Keep your chest up",
          "heels": "Keep your heels down", "knees": "Push your knees out",
          "tempo": "Slow down on the way down"}
+
+# Labels per exercise (the report from Step 3 says which one it is)
+EXERCISES = {
+    "squat": {"title": "AI SQUAT COACH", "angle": "Knee angle",
+              "refs": {STANDING: "standing", PARALLEL: "parallel"},
+              "tags": FAULT_TAG, "focus": FOCUS},
+    "pushup": {"title": "AI PUSH-UP COACH", "angle": "Elbow angle",
+               "refs": {STANDING: "arms locked", PARALLEL: "chest down"},
+               "tags": {"depth": "DEPTH", "sag": "HIPS SAG", "pike": "HIPS UP",
+                        "head": "HEAD", "tempo": "RUSHED", "lockout": "LOCKOUT",
+                        None: "NO REP"},
+               "focus": {"depth": "Get your chest lower", "sag": "Keep your hips up",
+                         "pike": "Keep a straight body line", "head": "Keep your head in line",
+                         "tempo": "Slow down on the way down",
+                         "lockout": "Lock out at the top"}},
+}
 
 # ---------------------------------------------------------------- fonts
 FONT_DIR = "fonts"
@@ -167,6 +185,7 @@ def mix(a, b, t):
 class Dashboard:
     def __init__(self, report, video_w, video_h):
         self.report = report
+        self.ex = EXERCISES.get(report.get("exercise", "squat"), EXERCISES["squat"])
         self.people = report["people"]
         self.many = len(self.people) > 1
         self.duration = max(report["duration_s"], 1.0)
@@ -174,22 +193,37 @@ class Dashboard:
             p["rgb"] = PERSON_RGB[k % len(PERSON_RGB)]
             p["_times"] = np.array([s[0] for s in p["series"]]) if p["series"] else np.zeros(0)
 
-        # video card
-        box_h = H - 2 * MARGIN
-        self.vw = min(int(round(box_h * video_w / video_h)), VIDEO_MAX_W) // 2 * 2
-        self.vh = int(round(self.vw * video_h / video_w)) // 2 * 2
-        self.vx, self.vy = MARGIN, MARGIN + (box_h - self.vh) // 2
-        # panel
-        self.px = MARGIN + self.vw + GAP
-        self.W = (self.px + PANEL_W + MARGIN) // 2 * 2
         y = MARGIN
         self.top = (y, y + 56)
         self.stats = (y + 76, y + 316)
-        self.chart = (y + 336, y + 676)
-        self.chips = (y + 696, H - MARGIN)
+        if video_w > video_h * 1.1:
+            # Landscape: big video top-left, stats and chart on the right,
+            # rep breakdown full width along the bottom
+            self.vw = WIDE_VIDEO_W
+            self.vh = int(round(self.vw * video_h / video_w)) // 2 * 2
+            if self.vh > H - 2 * MARGIN - GAP - 300:          # very tall-ish: keep room
+                self.vh = (H - 2 * MARGIN - GAP - 300) // 2 * 2
+                self.vw = int(round(self.vh * video_w / video_h)) // 2 * 2
+            self.vx, self.vy = MARGIN, MARGIN
+            self.pw = WIDE_PANEL_W
+            self.px = MARGIN + WIDE_VIDEO_W + GAP
+            self.chart = (y + 336, self.vy + self.vh)
+            self.chipbox = (MARGIN, self.vy + self.vh + GAP,
+                            self.px + self.pw, H - MARGIN)
+        else:
+            # Portrait / square: video on the left, everything else stacked on the right
+            box_h = H - 2 * MARGIN
+            self.vw = min(int(round(box_h * video_w / video_h)), VIDEO_MAX_W) // 2 * 2
+            self.vh = int(round(self.vw * video_h / video_w)) // 2 * 2
+            self.vx, self.vy = MARGIN, MARGIN + (box_h - self.vh) // 2
+            self.pw = PANEL_W
+            self.px = MARGIN + self.vw + GAP
+            self.chart = (y + 336, y + 676)
+            self.chipbox = (self.px, y + 696, self.px + PANEL_W, H - MARGIN)
+        self.W = (self.px + self.pw + MARGIN) // 2 * 2
         # plot area inside the chart card
-        self.ax0, self.ax1 = self.px + 96, self.px + PANEL_W - 30
-        self.ay0, self.ay1 = self.chart[0] + 70, self.chart[1] - 46
+        self.ax0, self.ax1 = self.px + 118, self.px + self.pw - 30
+        self.ay0, self.ay1 = self.chart[0] + 100, self.chart[1] - 46   # pills sit above the plot
 
         self.base = self.build_base()
         self.mask = self.build_video_mask()
@@ -213,8 +247,8 @@ class Dashboard:
         shadow = Image.new("RGBA", (self.W, H), (0, 0, 0, 0))
         s = ImageDraw.Draw(shadow)
         boxes = [(self.vx, self.vy, self.vx + self.vw, self.vy + self.vh)] + \
-            self.stat_boxes() + [(self.px, *self.chart_box()), (self.px, *self.chip_box())]
-        boxes = [b if len(b) == 4 else (b[0], b[1], b[3], b[2]) for b in boxes]
+            self.stat_boxes() + [(self.px, self.chart[0], self.px + self.pw, self.chart[1]),
+                                 self.chipbox]
         for b in boxes:
             s.rounded_rectangle((b[0], b[1] + 14, b[2], b[3] + 14), RADIUS, fill=(0, 0, 0, 120))
         img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(18)))
@@ -222,29 +256,29 @@ class Dashboard:
         L = Layer(0, 0, self.W, H)
         for b in self.stat_boxes():
             L.rrect(*b, RADIUS, fill=CARD, outline=CARD_EDGE)
-        L.rrect(self.px, self.chart[0], self.px + PANEL_W, self.chart[1], RADIUS,
+        L.rrect(self.px, self.chart[0], self.px + self.pw, self.chart[1], RADIUS,
                 fill=CARD, outline=CARD_EDGE)
-        L.rrect(self.px, self.chips[0], self.px + PANEL_W, self.chips[1], RADIUS,
-                fill=CARD, outline=CARD_EDGE)
+        L.rrect(*self.chipbox, RADIUS, fill=CARD, outline=CARD_EDGE)
         L.rrect(self.vx - 1, self.vy - 1, self.vx + self.vw + 1, self.vy + self.vh + 1,
                 RADIUS + 1, outline=CARD_EDGE, width=2)
 
         # brand
         L.circle(self.px + 12, self.top[0] + 26, 9, fill=GOOD)
-        L.text(self.px + 32, self.top[0] + 26, "AI SQUAT COACH", 24, "Bold", anchor="lm")
+        L.text(self.px + 32, self.top[0] + 26, self.ex["title"], 24, "Bold", anchor="lm")
 
         # static labels
         labels = ["CLEAN REPS", "FORM SCORE", "DEPTH"]
         for b, label in zip(self.stat_boxes(), labels):
             L.text(b[0] + 24, b[1] + 26, label, 15, "SemiBold", MUTED, anchor="lm")
-        L.text(self.px + 28, self.chart[0] + 34, "Knee angle", 22, "SemiBold", anchor="lm")
-        L.text(self.px + 28, self.chips[0] + 34, "Rep breakdown", 22, "SemiBold", anchor="lm")
-        for a, name in ((STANDING, "standing"), (PARALLEL, "parallel")):
+        L.text(self.px + 28, self.chart[0] + 34, self.ex["angle"], 22, "SemiBold", anchor="lm")
+        L.text(self.chipbox[0] + 28, self.chipbox[1] + 34, "Rep breakdown", 22, "SemiBold",
+               anchor="lm")
+        for a, name in self.ex["refs"].items():
             L.text(self.ax0 - 12, self.Y(a), name, 14, "Medium", MUTED, anchor="rm")
         for sec in range(0, int(self.duration) + 1, 5):
             L.text(self.X(sec), self.ay1 + 22, f"{sec}s", 13, "Medium", MUTED, anchor="mm")
         # legend
-        lx = self.px + PANEL_W - 28
+        lx = self.px + self.pw - 28
         if self.many:
             for p in reversed(self.people):
                 w = L.width_of(f"Person {p['person']}", 15, "Medium")
@@ -262,15 +296,9 @@ class Dashboard:
         return img
 
     def stat_boxes(self):
-        w = (PANEL_W - 2 * 20) / 3
+        w = (self.pw - 2 * 20) / 3
         return [(int(self.px + i * (w + 20)), self.stats[0],
                  int(self.px + i * (w + 20) + w), self.stats[1]) for i in range(3)]
-
-    def chart_box(self):
-        return (self.chart[0], self.px + PANEL_W, self.chart[1])
-
-    def chip_box(self):
-        return (self.chips[0], self.px + PANEL_W, self.chips[1])
 
     def build_video_mask(self):
         m = Image.new("L", (self.vw * SS, self.vh * SS), 0)
@@ -309,11 +337,14 @@ class Dashboard:
         canvas.paste(video, (self.vx, self.vy), self.mask)
         done = [[r for r in p["reps"] if r["time_s"] <= t] for p in self.people]
 
-        L = Layer(self.px, 0, PANEL_W, H)
+        L = Layer(self.px, 0, self.pw, H)
         self.draw_status(L, t, end_progress is not None)
         self.draw_stats(L, t, done)
-        self.draw_chips(L, t, done)
         L.onto(canvas)
+        x0, y0, x1, y1 = self.chipbox
+        C = Layer(x0, y0, x1 - x0, y1 - y0)
+        self.draw_chips(C, t, done)
+        C.onto(canvas)
         self.draw_chart(canvas, t, done)
 
         V = Layer(self.vx, self.vy, self.vw, self.vh)
@@ -325,7 +356,7 @@ class Dashboard:
         return cv2.cvtColor(np.asarray(canvas.convert("RGB")), cv2.COLOR_RGB2BGR)
 
     def draw_status(self, L, t, done):
-        right, cy = self.px + PANEL_W, self.top[0] + 26
+        right, cy = self.px + self.pw, self.top[0] + 26
         if done:
             label, colour = "SET COMPLETE", GOOD
         else:
@@ -408,7 +439,7 @@ class Dashboard:
     # ---- chart (line + glow + gradient fill, drawn straight on the canvas)
     def draw_chart(self, canvas, t, done):
         x0, y0, x1, y1 = self.ax0, self.ay0, self.ax1, self.ay1
-        C = Layer(x0 - 20, y0 - 16, x1 - x0 + 40, y1 - y0 + 32)
+        C = Layer(x0 - 20, y0 - 44, x1 - x0 + 40, y1 - y0 + 60)
 
         # rep bands + numbers
         for k, (p, reps) in enumerate(zip(self.people, done)):
@@ -422,8 +453,8 @@ class Dashboard:
                 else:
                     C.rrect(bx0, y0, bx1, y1, 10, fill=with_alpha(colour, 0.13 * appear))
                     mx = (bx0 + bx1) / 2
-                    C.rrect(mx - 14, y0 + 6, mx + 14, y0 + 32, 8, fill=with_alpha(colour, appear))
-                    C.text(mx, y0 + 19, str(r["rep"]), 14, "Bold", with_alpha(BG_TOP, appear),
+                    C.rrect(mx - 14, y0 - 34, mx + 14, y0 - 8, 8, fill=with_alpha(colour, appear))
+                    C.text(mx, y0 - 21, str(r["rep"]), 14, "Bold", with_alpha(BG_TOP, appear),
                            anchor="mm")
         # grid
         for a in (STANDING, PARALLEL):
@@ -484,17 +515,18 @@ class Dashboard:
 
     # ---- rep chips
     def draw_chips(self, L, t, done):
+        bx0, by0, bx1, by1 = self.chipbox
+        cols, gap = (6 if bx1 - bx0 > 1200 else 5), 14
         rows = sorted(((p, r) for p, reps in zip(self.people, done) for r in reps),
-                      key=lambda pr: pr[1]["time_s"])[-10:]
-        x0, y0 = self.px + 24, self.chips[0] + 66
-        cols, gap = 5, 14
-        cw = (PANEL_W - 48 - gap * (cols - 1)) / cols
-        ch = (self.chips[1] - 20 - y0 - gap) / 2
+                      key=lambda pr: pr[1]["time_s"])[-cols * 2:]
+        x0, y0 = bx0 + 24, by0 + 66
+        cw = (bx1 - bx0 - 48 - gap * (cols - 1)) / cols
+        ch = (by1 - 20 - y0 - gap) / 2
 
         allreps = [r for reps in done for r in reps]
         if allreps:
             tempo = np.mean([r["measured"]["tempo"] for r in allreps])
-            L.text(self.px + PANEL_W - 28, self.chips[0] + 34, f"avg lowering {tempo:.1f}s",
+            L.text(bx1 - 28, by0 + 34, f"avg lowering {tempo:.1f}s",
                    15, "Medium", MUTED, anchor="rm")
 
         for slot in range(cols * 2):
@@ -515,7 +547,7 @@ class Dashboard:
             L.text(cx0 + 16, cy0 + 24 + lift, tag, 13, "SemiBold", with_alpha(MUTED, a), anchor="lm")
             L.text(cx0 + cw / 2, cy0 + ch / 2 + 4 + lift, str(r["score"]), 38, "Bold",
                    with_alpha(score_col if r["valid"] else TEXT, a), anchor="mm")
-            word = "GOOD" if r["valid"] else FAULT_TAG.get(r["main_fault"], "NO REP")
+            word = "GOOD" if r["valid"] else self.ex["tags"].get(r["main_fault"], "NO REP")
             L.text(cx0 + cw / 2, cy0 + ch - 22 + lift, word, 14, "Bold",
                    with_alpha(colour, a), anchor="mm")
 
@@ -536,7 +568,7 @@ class Dashboard:
             a = ease(age / 0.25) * (1 - ease((age - 1.2) / 0.3))
             colour = GOOD if r["valid"] else BAD
             title = f"Rep {r['rep']}" if r["valid"] else "No rep"
-            sub = f"{r['score']} / 100" if r["valid"] else FOCUS.get(r["main_fault"], "")
+            sub = f"{r['score']} / 100" if r["valid"] else self.ex["focus"].get(r["main_fault"], "")
             if self.many:
                 title = f"P{p['person']} · {title}"
             w = max(V.width_of(title, 24, "Bold"), V.width_of(sub, 15, "Medium")) + 84
@@ -559,7 +591,7 @@ class Dashboard:
         good = sum(r["valid"] for r in reps)
         best = max(reps, key=lambda r: r["score"])
         faults = Counter(r["main_fault"] for r in reps if r["main_fault"])
-        focus = FOCUS[faults.most_common(1)[0][0]] if faults else "Great set. Keep it up!"
+        focus = self.ex["focus"].get(faults.most_common(1)[0][0], "") if faults else "Great set. Keep it up!"
         avg = np.mean([r["score"] for r in reps])
 
         w = min(self.vw - 48, 520)

@@ -132,6 +132,12 @@ def is_real_person(pts, frame_h):
     return height >= MIN_BODY_HEIGHT * frame_h
 
 
+def is_horizontal(pts):
+    """Body lying flat (shoulders to ankles within 40 deg of horizontal)."""
+    d = mid(pts, "ankle") - mid(pts, "shoulder")
+    return bool(np.degrees(np.arctan2(abs(d[1]), abs(d[0]) + 1e-6)) < 40)
+
+
 class ViewDetector:
     """Decides whether the camera sees this person from the front or the side.
     Two thresholds so the view doesn't flicker between them."""
@@ -304,6 +310,7 @@ class Person:
         self.knee = None
         self.view = "side"
         self.seen = 0
+        self.horizontal = 0       # frames lying flat: a hint that this is a push-up video
         self.series = []          # [time_s, knee_deg] every frame, for the Step 5 chart
         self.flash = 0
         self.feedback, self.feedback_frames = None, 0
@@ -498,6 +505,7 @@ def main(video_path, max_people=MAX_PEOPLE):
                 continue
             pts = person.smoother(bodies[i])
             person.seen += 1
+            person.horizontal += is_horizontal(pts)
             view = person.view = person.view_detector(pts)
 
             if view == "side":
@@ -556,7 +564,8 @@ def main(video_path, max_people=MAX_PEOPLE):
         "video": video_path, "fps": fps, "duration_s": round(frame_idx / fps, 2),
         "people": [{"person": p.index + 1, "colour_bgr": list(p.colour),
                     "reps": p.coach.reps, "average_score": p.coach.average,
-                    "series": p.series} for p in real],
+                    "series": p.series,
+                    "horizontal_share": round(p.horizontal / max(p.seen, 1), 2)} for p in real],
         "cues": [c for c in cues if any(p.index + 1 == c["person"] for p in real)],
     }
     with open(json_path, "w") as f:
@@ -567,6 +576,10 @@ def main(video_path, max_people=MAX_PEOPLE):
         print(f"\nWARNING: {out_path} is empty. Close any video player and run again.")
     print(f"\nSaved video: {os.path.abspath(out_path)} ({size_mb:.1f} MB)")
     print(f"Saved report: {os.path.abspath(json_path)}\n")
+    if not any(p.coach.reps for p in real) and any(p.horizontal > p.seen / 2 for p in real):
+        print("No squats found, and the person is lying flat most of the time.\n"
+              f"This looks like a push-up video. Try:  python run_coach.py {video_path} "
+              "--exercise pushup\n")
     for p in real:
         print(f"Person {p.index + 1}: {p.coach.good_reps} good reps out of "
               f"{len(p.coach.reps)} attempts, average score {p.coach.average}")

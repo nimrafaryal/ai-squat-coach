@@ -1,10 +1,12 @@
-# 🏋️ AI Squat Coach
+# 🏋️ AI Squat & Push-up Coach
 
-An AI coach that watches a squat video, **counts reps, scores your form, rejects bad reps, and talks you through the set**, then renders everything into a live analytics dashboard.
+An AI coach that watches a **squat or push-up** video, **counts reps, scores your form, rejects bad reps, and talks you through the set**, then renders everything into a live analytics dashboard.
 
 Runs on a normal laptop CPU. No GPU, no app, just a video.
 
-![AI Squat Coach demo](assets/demo.gif)
+| Squats | Push-ups |
+| --- | --- |
+| ![Squat coach demo](assets/demo.gif) | ![Push-up coach demo](assets/pushup_demo.gif) |
 
 ## What it does
 
@@ -52,12 +54,24 @@ Video ──► MediaPipe Pose ──► smoothing + near-side selection ──�
 
 A rep is a **no rep** if it scores below 70, never reaches depth, leans past 60°, lifts the heels clearly, or the knees cave below 75% of the ankle gap. All thresholds are constants at the top of `step3_form_score.py`, so they're easy to tune.
 
+### Push-ups (side view)
+
+| Rule | Points | Full marks when |
+| --- | --- | --- |
+| Depth | 35 | elbow angle ≤ 90° at the bottom |
+| Body line | 30 | hips within 5% of the shoulder–ankle line (no sagging or piking) |
+| Tempo | 15 | lowering takes ≥ 0.5 s |
+| Lockout | 10 | elbows ≥ 160° at the top |
+| Head | 10 | head in line with the body, not dropping to the floor |
+
+A push-up is a **no rep** if the elbow never gets below 100°, the hips are more than 9% off the line, or it scores below 70. Reps only count while you're in a plank (straight legs, body near horizontal), so getting into position or standing up doesn't add reps. Thresholds live at the top of `pushup_form_score.py`.
+
 ## Quick start
 
 Python 3.9 to 3.12.
 
 ```bash
-git clone https://github.com/nimrafaryal/ai-squat-coach.git
+git clone https://github.com/<your-username>/ai-squat-coach.git
 cd ai-squat-coach
 pip install -r requirements.txt
 python run_coach.py path/to/squat.mp4
@@ -68,6 +82,7 @@ Your result is `output/<name>_dashboard.mp4`. The pose model and fonts download 
 Options:
 
 ```bash
+python run_coach.py pushups.mp4 --exercise pushup   # push-ups (film from the side)
 python run_coach.py squat.mp4 --people 1            # only track one person
 python run_coach.py squat.mp4 --voice en-GB-RyanNeural
 python run_coach.py squat.mp4 --no-music            # drop the clip's own sound
@@ -78,6 +93,7 @@ python run_coach.py squat.mp4 --no-voice            # silent dashboard
 
 - Camera at **hip height, 2–3 m away**, full body in frame, steady (prop it up)
 - **Side view** for depth, back angle and heels. **Front view** for knee cave.
+- **Push-ups: always side view**, camera at floor level, whole body from head to feet in frame
 - Good light, fitted clothes, and **socks or barefoot**: loose footwear can confuse the heel check
 
 ## Project structure
@@ -87,7 +103,8 @@ python run_coach.py squat.mp4 --no-voice            # silent dashboard
 | `run_coach.py` | Runs the full pipeline on one video |
 | `step1_pose_video.py` | Draws the raw pose skeleton (a starting point for learning) |
 | `step2_rep_counter.py` | Simple rep counter with a HUD |
-| `step3_form_score.py` | Form rules, scoring, no-rep detection, view detection |
+| `step3_form_score.py` | Squat form rules, scoring, no-rep detection, view detection |
+| `pushup_form_score.py` | Push-up form rules, scoring and no-rep detection (same outputs as Step 3) |
 | `step4_voice_coach.py` | Writes and speaks the coaching cues, mixes the audio |
 | `step5_dashboard.py` | Renders the analytics dashboard video |
 | `pose_utils.py` | Shared helpers: model, smoothing, angles, drawing |
@@ -104,7 +121,7 @@ Each step can also be run on its own: `python step3_form_score.py squat.mp4`.
 
 ## Ideas for next steps
 
-Push-ups and lunges · live webcam mode · per-person calibration · fatigue detection · a learned scoring model
+Lunges and pull-ups · live webcam mode · per-person calibration · fatigue detection · a learned scoring model
 
 ## License
 
